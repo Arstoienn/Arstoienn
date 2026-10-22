@@ -1,0 +1,155 @@
+name: randomart
+
+# Draws the newest commit in any of my public repos, not just this one, and
+# publishes it with GitHub Pages, so the repo keeps its one commit and no
+# branch. A push here redraws at once; the schedule looks every half hour.
+on:
+  push:
+  workflow_dispatch:
+  schedule:
+    - cron: "17,47 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: randomart
+  cancel-in-progress: true
+
+jobs:
+  draw:
+    # A scheduled run's event carries no repository, and always runs on the default branch.
+    if: github.event_name != 'push' || github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    outputs:
+      skip: ${{ steps.draw.outputs.skip }}
+    steps:
+      - name: Draw randomart for the newest commit
+        id: draw
+        env:
+          TOKEN: ${{ github.token }}
+          OWNER: ${{ github.repository_owner }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/art" && cd "$RUNNER_TEMP/art"
+          python3 - <<'PY'
+          import html, json, os, urllib.error, urllib.request
+
+          def get(path):
+              req = urllib.request.Request("https://api.github.com" + path, headers={
+                  "Authorization": "Bearer " + os.environ["TOKEN"], "Accept": "application/vnd.github+json"})
+              with urllib.request.urlopen(req, timeout=30) as r:
+                  return json.load(r)
+
+          # The newest commit on the default branch of each public repo I own, by commit time
+          repos, page = [], 1
+          while batch := get(f"/users/{os.environ['OWNER']}/repos?type=owner&per_page=100&page={page}"):
+              repos += batch
+              page += 1
+          newest = None
+          for r in repos:
+              if r["fork"] or r["archived"] or r["private"]:
+                  continue
+              try:
+                  c = get(f"/repos/{r['full_name']}/commits/{r['default_branch']}")
+              except urllib.error.HTTPError:  # an empty repo has no commits
+                  continue
+              when = c["commit"]["committer"]["date"]
+              if newest is None or when > newest[0]:
+                  newest = (when, r["name"], c["sha"], c["html_url"])
+          when, name, sha, url = newest
+          drawn = f"{name}@{sha}"
+
+          # On the schedule, leave the site alone when no repo has moved
+          owner, repo = os.environ["GITHUB_REPOSITORY"].split("/")
+          skip = False
+          if os.environ["EVENT"] == "schedule":
+              try:
+                  with urllib.request.urlopen(f"https://{owner.lower()}.github.io/{repo}/sha.txt", timeout=30) as r:
+                      skip = r.read().decode().strip() == drawn
+              except urllib.error.URLError:
+                  pass
+          with open(os.environ["GITHUB_OUTPUT"], "a") as out:
+              out.write(f"skip={str(skip).lower()}\n")
+          print(f"{name} {sha} {when}" + (" (unchanged)" if skip else ""))
+          if skip:
+              raise SystemExit
+
+          FX, FY, SYMS = 17, 9, " .o+=*BOX@%&#/^SE"
+          field = [[0] * FY for _ in range(FX)]
+          x, y = FX // 2, FY // 2
+          for byte in bytes.fromhex(sha):
+              for _ in range(4):
+                  x = max(0, min(FX - 1, x + (1 if byte & 1 else -1)))
+                  y = max(0, min(FY - 1, y + (1 if byte & 2 else -1)))
+                  if field[x][y] < 14:
+                      field[x][y] += 1
+                  byte >>= 2
+          field[FX // 2][FY // 2] = 15
+          field[x][y] = 16
+          def edge(t):
+              left = (FX - len(t)) // 2
+              return "+" + "-" * left + t + "-" * (FX - left - len(t)) + "+"
+          top = "[" + (name if len(name) <= 15 else name[:14] + "~") + "]"
+          lines = [edge(top)]
+          lines += ["|" + "".join(SYMS[field[c][r]] for c in range(FX)) + "|" for r in range(FY)]
+          lines += [edge("[" + sha[:7] + "]")]
+          open("randomart.txt", "w").write("\n".join(lines) + "\n")
+          cw, ch, pad = 10, 18, 14
+          w, h = len(lines[0]) * cw + 2 * pad, len(lines) * ch + 2 * pad
+          out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}" role="img">',
+                 f"<title>randomart of {html.escape(name)}@{sha[:7]}</title>",
+                 f'<rect width="{w}" height="{h}" rx="10" fill="#0d1117"/>',
+                 '<g font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,monospace" font-size="15" text-anchor="middle">']
+          for r, line in enumerate(lines):
+              for c, chr_ in enumerate(line):
+                  if chr_ == " ":
+                      continue
+                  frame = r in (0, len(lines) - 1) or c in (0, len(line) - 1)
+                  color = "#8b949e" if frame else "#58a6ff" if chr_ in "SE" else "#e6edf3"
+                  out.append(f'<text x="{pad + (c + 0.5) * cw:g}" y="{pad + r * ch + ch * 0.75:g}" fill="{color}">{html.escape(chr_)}</text>')
+          out += ["</g>", "</svg>"]
+          open("randomart.svg", "w").write("\n".join(out) + "\n")
+          print("\n".join(lines))
+          # "latest commit from lpspell #abc1234", in GitHub's muted and link colors; icon and text line up with the contact pills
+          mono, char_w = "ui-monospace,SFMono-Regular,Menlo,Consolas,monospace", 7.2
+          icon = "M11.93 8.5a4.002 4.002 0 0 1-7.86 0H.75a.75.75 0 0 1 0-1.5h3.32a4.002 4.002 0 0 1 7.86 0h3.32a.75.75 0 0 1 0 1.5Zm-1.43-.75a2.5 2.5 0 1 0-5 0 2.5 2.5 0 0 0 5 0Z"
+          label, tag = "latest commit from " + name, "#" + sha[:7]
+          lw, tx, tw = round(len(label) * char_w), round(32 + (len(label) + 1) * char_w), round(len(tag) * char_w)
+          for theme, muted, link in [("light", "#59636e", "#0969da"), ("dark", "#9198a1", "#4493f8")]:
+              svg = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{tx + tw + 2}" height="20" viewBox="0 0 {tx + tw + 2} 20" role="img">',
+                     f"<title>latest commit from {html.escape(name)} {sha[:7]}</title>",
+                     f'<svg x="11" y="3" width="14" height="14" viewBox="0 0 16 16"><path fill="{muted}" d="{icon}"/></svg>',
+                     f'<g font-family="{mono}" font-size="12">',
+                     f'<text x="32" y="14.5" fill="{muted}" textLength="{lw}" lengthAdjust="spacing">{label}</text>',
+                     f'<text x="{tx}" y="14.5" fill="{link}" textLength="{tw}" lengthAdjust="spacing">{tag}</text>',
+                     "</g>", "</svg>"]
+              open(f"commit-{theme}.svg", "w").write("\n".join(svg) + "\n")
+          # The profile links to the site itself, which sends you on to the commit
+          open("index.html", "w").write(
+              f'<!doctype html><meta charset="utf-8"><title>{html.escape(drawn)}</title>'
+              f'<meta http-equiv="refresh" content="0; url={html.escape(url)}">'
+              f'<a href="{html.escape(url)}">{html.escape(name)}@{sha[:7]}</a>, committed {when}\n')
+          open("sha.txt", "w").write(drawn + "\n")
+          PY
+
+      - name: Package the site
+        if: steps.draw.outputs.skip != 'true'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: ${{ runner.temp }}/art
+
+  publish:
+    needs: draw
+    if: needs.draw.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Publish with GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v5
